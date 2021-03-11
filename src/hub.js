@@ -454,9 +454,15 @@ async function updateUIForHub(hub, hubChannel) {
   remountUI({ hub, entryDisallowed: !hubChannel.canEnterRoom(hub) });
 }
 
+const ROOM_RECONNECTION_INITIAL_DELAY = 2000;
+const ROOM_RECONNECTION_DELAY = 1000;
+const ROOM_CONNECTION_TIMEOUT = 90000;
+
 function handleHubChannelJoined(entryManager, hubChannel, messageDispatch, data) {
   const scene = document.querySelector("a-scene");
   const isRejoin = NAF.connection.isConnected();
+  let reconnectionDelay = ROOM_RECONNECTION_INITIAL_DELAY;
+  let connectionStartTime = null;
 
   if (isRejoin) {
     // Slight hack, to ensure correct presence state we need to re-send the entry event
@@ -556,30 +562,6 @@ function handleHubChannelJoined(entryManager, hubChannel, messageDispatch, data)
     while (!scene.components["networked-scene"] || !scene.components["networked-scene"].data) await nextTick();
 
     scene.addEventListener("adapter-ready", ({ detail: adapter }) => {
-      let newHostPollInterval = null;
-
-      // When reconnecting, update the server URL if necessary
-      adapter.setReconnectionListeners(
-        () => {
-          if (newHostPollInterval) return;
-
-          newHostPollInterval = setInterval(async () => {
-            const currentServerURL = scene.getAttribute("networked-scene").serverURL;
-            const newServerURL = adapter.serverURL;
-            if (currentServerURL !== newServerURL) {
-              console.log("Connecting to new Janus server " + newServerURL);
-              scene.setAttribute("networked-scene", { serverURL: newServerURL });
-              adapter.serverUrl = newServerURL;
-            }
-          }, 1000);
-        },
-        () => {
-          clearInterval(newHostPollInterval);
-          newHostPollInterval = null;
-        },
-        null
-      );
-
       const sendViaPhoenix = reliable => (clientId, dataType, data) => {
         const payload = { dataType, data };
 
@@ -623,31 +605,37 @@ function handleHubChannelJoined(entryManager, hubChannel, messageDispatch, data)
       adapter.unreliableTransport = sendViaPhoenix(false);
     });
 
-    const loadEnvironmentAndConnect = () => {
-      updateEnvironmentForHub(hub, entryManager);
-      function onConnectionError() {
-        console.error("Unknown error occurred while attempting to connect to networked scene.");
-        remountUI({ roomUnavailableReason: ExitReason.connectError });
-        entryManager.exitScene();
-      }
-
-      const connectionErrorTimeout = setTimeout(onConnectionError, 90000);
+    const connect = () => {
       scene.components["networked-scene"]
         .connect()
         .then(() => {
-          clearTimeout(connectionErrorTimeout);
+          console.log("Successfully connected to the networked scene.");
           scene.emit("didConnectToNetworkedScene");
         })
         .catch(connectError => {
-          clearTimeout(connectionErrorTimeout);
-          // hacky until we get return codes
-          const isFull = connectError.msg && connectError.msg.match(/\bfull\b/i);
-          console.error(connectError);
-          remountUI({ roomUnavailableReason: isFull ? ExitReason.full : ExitReason.connectError });
-          entryManager.exitScene();
+          const now = Date.now();
+          if (now - connectionStartTime < ROOM_CONNECTION_TIMEOUT) {
+            console.warn("Error connecting to the networked scene, retrying...");
+            reconnectionDelay += ROOM_RECONNECTION_DELAY;
+            NAF.connection.adapter.disconnect();
+            setTimeout(connect, reconnectionDelay);
+          } else {
+            console.error("Error occurred while attempting to connect to networked scene.", connectError);
+            // hacky until we get return codes
+            const isFull = connectError.msg && connectError.msg.match(/\bfull\b/i);
+            remountUI({ roomUnavailableReason: isFull ? ExitReason.full : ExitReason.connectError });
+            entryManager.exitScene();
+          }
 
           return;
         });
+    };
+
+    const loadEnvironmentAndConnect = () => {
+      updateEnvironmentForHub(hub, entryManager);
+      reconnectionDelay = ROOM_RECONNECTION_INITIAL_DELAY;
+      connectionStartTime = Date.now();
+      connect();
     };
 
     window.APP.hub = hub;
