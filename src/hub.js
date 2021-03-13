@@ -188,6 +188,7 @@ if (isEmbed && !qs.get("embed_token")) {
 }
 
 THREE.Object3D.DefaultMatrixAutoUpdate = false;
+window.APP.quality = "low";
 
 import "./components/owned-object-limiter";
 import "./components/owned-object-cleanup-timeout";
